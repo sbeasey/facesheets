@@ -1,3 +1,10 @@
+terraform {
+  backend "gcs" {
+    bucket  = "tt-tfstate"  # Replace with your bucket name
+    prefix  = "facesheets"  # Example prefix
+  }
+}
+
 variable "project_id" {
   type = string
   description = "The ID of the Google Cloud project"
@@ -37,38 +44,16 @@ resource "google_project_service" "storage_api" {
   project            = var.project_id
 }
 
-resource "google_storage_bucket" "bucket" {
-  name          = "facesheets-output-${random_id.name_suffix.hex}"
-  location      = var.region
-  force_destroy = true
-  project       = var.project_id
-
-  depends_on = [google_project_service.storage_api]
-}
-
-# Create a Secret in Secret Manager
-resource "google_secret_manager_secret" "bucket_name_secret" {
-  project  = var.project_id
-  secret_id = "facesheets-output-bucket-name"
-  replication {
-    user_managed {
-      replicas {
-        location = var.region
-      }
-    }
-  }
-}
- 
-# Create a Secret Version with the bucket name
-resource "google_secret_manager_secret_version" "bucket_name_secret_version" {
-  secret = google_secret_manager_secret.bucket_name_secret.id
-  secret_data = google_storage_bucket.bucket.name
+resource "google_project_service" "secretmanager_api" {
+  service            = "secretmanager.googleapis.com"
+  disable_on_destroy = false
+  project            = var.project_id
 }
 
 # Create a service account
 resource "google_service_account" "facesheets_sa" {
-  account_id   = "facesheets-${random_id.name_suffix.hex}"
-  display_name = "facesheets Service Account"
+  account_id   = "tt-facesheets-${random_id.name_suffix.hex}"
+  display_name = "Facesheets Service Account"
   project      = var.project_id
 }
  
@@ -81,7 +66,8 @@ resource "google_project_iam_member" "facesheets_cloud_run_invoker" {
  
 resource "google_project_iam_member" "facesheets_eventarc_event_receiver" {
   project = var.project_id
-  role    = "roles/eventarc.eventReceiver"
+#  role    = "roles/eventarc.eventReceiver"
+  role    = "roles/eventarc.admin"
   member  = "serviceAccount:${google_service_account.facesheets_sa.email}"
 }
  
@@ -98,13 +84,13 @@ resource "google_project_iam_member" "facesheets_artifact_registry_create_on_pus
 }
 
 resource "google_secret_manager_secret_iam_member" "service_account_access" {
-  secret_id = "projects/${var.project_id}/secrets/facesheets-bucket-name"
+  secret_id = "projects/${var.project_id}/secrets/tt-facesheets-bucket-name"
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.facesheets_sa.email}"
 }
 
 resource "google_cloud_run_v2_service" "default" {
-  name     = "facesheets-${random_id.name_suffix.hex}"
+  name     = "tt-facesheets-${random_id.name_suffix.hex}"
   location = var.region 
   project  = var.project_id
   deletion_protection = false
@@ -118,8 +104,13 @@ resource "google_cloud_run_v2_service" "default" {
   depends_on = [google_project_service.run_api]
 }
 
+# Retrieve the bucket name from the Secret Manager secret
+data "google_secret_manager_secret_version" "bucket_name" {
+  secret = "projects/${var.project_id}/secrets/tt-facesheets-bucket-name"
+}
+
 resource "google_eventarc_trigger" "storage_to_cloud_run" {
-  name     = "storage-to-cloud-run-trigger-${random_id.name_suffix.hex}"
+  name     = "tt-storage-to-cloud-run-trigger-${random_id.name_suffix.hex}"
   location = var.region
   project  = var.project_id
 
@@ -129,7 +120,7 @@ resource "google_eventarc_trigger" "storage_to_cloud_run" {
   }
   matching_criteria {
     attribute = "bucket"
-    value     = google_storage_bucket.bucket.name 
+    value     = data.google_secret_manager_secret_version.bucket_name.secret_data
   }
 
   destination {
